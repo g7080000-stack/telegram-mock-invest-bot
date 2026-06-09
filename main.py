@@ -19,7 +19,7 @@ DB_FILE = "stock_db.json"
 EXCHANGE_RATE = 1500
 INITIAL_CASH = 10_000_000
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8844020527:AAEfFnjRKCNr4javTv8tQllnQrt0Y1TiSBo)"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8844020527:AAEfFnjRKCNr4javTv8tQllnQrt0Y1TiSBo")
 ADMIN_ID = 8727188480 # 방장 전용 명령어 텔레그램 ID
 
 KST = ZoneInfo("Asia/Seoul")
