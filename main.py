@@ -425,12 +425,13 @@ def build_portfolio_data(data):
                 
     items = sorted(items, key=lambda x: x['val'], reverse=True)
     
+    # ✨ 차트 이미지 가독성 업그레이드: 범례 라벨에 컴마가 포함된 명확한 자산 금액 추가
     for item in items:
         if not item["error"] and item['val'] > 0:
-            labels.append(item['name'])
+            labels.append(f"{item['name']} ({item['val']:,}원)")
             values.append(item['val'])
     if cash > 0:
-        labels.append("현금")
+        labels.append(f"현금 ({cash:,}원)")
         values.append(cash)
 
     chart_url = None
@@ -460,29 +461,29 @@ def build_portfolio_data(data):
     return msg, chart_url
 
 # =========================
-# 기본 명령어 (도움말 개편)
+# 기본 명령어
 # =========================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "📖 [팀 모의투자 대회 사용 설명서]\n"
+        "📖 [팀 배틀 모의투자 대회 사용 설명서]\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-      
+ 
         "⏰ 1. 증시 개장 및 거래 시간\n"
-        "- 국내 주식(국장): 평일 09:05 ~ 15:30 (시가 단일가 VI 방지)\n"
+        "- 국내 주식(국장): 평일 09:05 ~ 15:30 (시가 단일가 VI 꼼수 방지)\n"
         "- 미국 주식(미장): 평일 17:00 ~ 익일 오전 09:00\n"
         "⚠️ 미국 주식 주간 거래(데이마켓)는 시세 동기화 문제로 거래가 철저히 제한됩니다.\n"
-        "⚠️ 주말 및 공휴일은 휴장입니다.\n\n"
+        "⚠️ 주말 및 양국 공휴일은 양쪽 시장 모두 휴장입니다.\n\n"
         "🛒 2. 주식 매매 명령어\n"
         "- 수량 기준 주문: /[종목명] [수량]주 매수 / 매도\n"
         "  (예: /삼성전자 10주 매수 | /테슬라 5주 매도)\n"
         "- 비율 기준 주문: /[종목명] [비율]% 매수 / 매도\n"
-        "  (예: /SK하이닉스 50% 매수 [현금 기준] | /애플 25% 매도 [수량 기준])\n"
+        "  (예: /SK하이닉스 50% 매수 | /삼성전자 30프로 매수 | /애플 25% 매도)\n"
         "- 전량 주문: /[종목명] 풀매수 / 풀매도\n"
         "⚠️ 해외주식은 유명 기업 제외 티커(TSLA, NVDA 등) 입력 필수\n\n"
         "🔍 3. 자산 및 순위 조회\n"
         "- /[종목명] : 해당 종목 현재가 및 등락률 실시간 조회\n"
-        "- /내계좌 : 본인의 자산 현황 및 포트폴리오 조회\n"
-        "- /[상대닉네임] 계좌 : 상대방의 자산 현황 및 포트폴리오 확인\n"
+        "- /내계좌 : 본인의 자산 현황 및 포트폴리오 파이 차트 시각화 조회\n"
+        "- /[상대닉네임] 계좌 : 상대방의 자산 현황 및 포트폴리오 차트 확인\n"
         "- /순위 : 팀별 평균 수익률 랭킹 및 개인 순위 실시간 조회\n\n"
         "🚫 4. 리스크 관리 시스템\n"
         "- 단타 제한: 매수 체결 직후 해당 종목은 10분간 매도 불가 (지연 시세 악용 방지)\n"
@@ -680,9 +681,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in db: return
 
-    # 주문 처리
+    # 주문 처리 (정규식 고도화: %, 프로, 퍼센트 통합 지원)
     match_qty = re.search(r"([가-힣A-Za-z0-9\s\.\-_]+?)\s+(\d+)\s*주?\s*(매수|사줘|매도|팔아)", text)
-    match_pct = re.search(r"([가-힣A-Za-z0-9\s\.\-_]+?)\s+(\d+)\s*%\s*(매수|사줘|매도|팔아)", text)
+    match_pct = re.search(r"([가-힣A-Za-z0-9\s\.\-_]+?)\s+(\d+)\s*(?:%|프로|퍼센트)\s*(매수|사줘|매도|팔아)", text)
     match_all = re.search(r"([가-힣A-Za-z0-9\s\.\-_]+?)\s*(풀매수|풀매도)", text)
 
     if match_qty or match_pct or match_all:
