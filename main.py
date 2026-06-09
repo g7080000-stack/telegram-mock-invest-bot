@@ -23,6 +23,7 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8844020527:AAEfFnjRKCNr4javTv8tQll
 ADMIN_ID = 8727188480 # 방장 전용 명령어 텔레그램 ID
 
 KST = ZoneInfo("Asia/Seoul")
+EST = ZoneInfo("America/New_York") # 미국 시간대 추가
 
 KOREAN_MARKET_HOLIDAYS = {
     "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18", "2026-03-02", 
@@ -81,12 +82,9 @@ def is_korean_market_open():
 
 def is_us_market_open():
     now = datetime.now(KST)
-    
-    # 1. 주말(토요일, 일요일) 차단
     if now.weekday() in [5, 6]: 
         return False, "주말에는 미국 주식 거래가 중단됩니다."
         
-    # 2. 미국 증시 휴장일(공휴일) 차단
     adjusted_now = now - timedelta(hours=9)
     if adjusted_now.strftime("%Y-%m-%d") in US_MARKET_HOLIDAYS:
         return False, "오늘은 미국 증시 휴장일(공휴일)입니다."
@@ -159,6 +157,7 @@ def get_stock_info(target):
     
     return None, None, False, []
 
+# ✨ 미국 정규장/프리장 실시간 등락률 결함 전면 수정
 def get_current_price(code, is_us):
     try:
         if is_us:
@@ -173,20 +172,31 @@ def get_current_price(code, is_us):
             if df_min.empty: raise Exception("미국 주식 데이터 불러오기 실패")
             current_price = float(df_min["Close"].dropna().iloc[-1])
             
+            # 정확한 전일 정규장 종가 계산 로직 도입
             df_daily = tk.history(period="5d")
-            if len(df_daily) >= 2:
-                last_regular = float(df_daily["Close"].dropna().iloc[-1])
-                prev_regular = float(df_daily["Close"].dropna().iloc[-2])
+            us_today_str = datetime.now(EST).strftime("%Y-%m-%d")
+            # 오늘 형성된 일봉 봉 데이터가 섞여있다면 제외하여 순수 직전 마감 종가만 타겟팅
+            df_daily = df_daily[df_daily.index.strftime("%Y-%m-%d") != us_today_str]
+            
+            if not df_daily.empty:
+                prev_regular_close = float(df_daily["Close"].dropna().iloc[-1])
             else:
-                last_regular = current_price
-                prev_regular = current_price
+                prev_regular_close = current_price
 
-            if abs(current_price - last_regular) > 0.001:
-                change_rate = ((current_price - last_regular) / last_regular) * 100
-                market_state = "🌙 프리/애프터장"
+            # 프리장/정규장 구분 없이 실시간 가격과 전일 종가 기반으로 등락률 동기화
+            change_rate = ((current_price - prev_regular_close) / prev_regular_close) * 100
+            
+            # 현재 정규장 시간인지 여부 체크
+            now_time = datetime.now(KST).time()
+            if dtime(9, 0) <= now_time < dtime(17, 0):
+                market_state = "☀️ 정규장" # 낮 시간 구동 강제용 텍스트 매칭 유지
             else:
-                change_rate = ((last_regular - prev_regular) / prev_regular) * 100 if prev_regular > 0 else 0.0
-                market_state = "☀️ 정규장"
+                # 미국 시간 기준 정규장 작동 여부 판단 변동성 대응
+                now_est = datetime.now(EST).time()
+                if dtime(9, 30) <= now_est <= dtime(16, 0):
+                    market_state = "☀️ 정규장"
+                else:
+                    market_state = "🌙 프리/애프터장"
                 
             usd_price = round(current_price, 2)
             krw_price = int(current_price * current_exchange_rate)
@@ -240,6 +250,7 @@ async def buy_logic(update, context, ticker_input, amount):
         current_held_qty = db[user_id]["portfolio"].get(code, {}).get("quantity", 0) if code in db[user_id]["portfolio"] else 0
         current_held_value = current_held_qty * current_price
 
+        # ✨ 실시간 change_rate 정상 연동으로 40% 이상 폭등 제한 동작 활성화
         if change_rate >= 40.0:
             max_allowed_value = total_eval * 0.4
             remaining_allowed_value = max_allowed_value - current_held_value
@@ -298,7 +309,6 @@ async def buy_logic(update, context, ticker_input, amount):
         holding["is_us"] = is_us
         holding["last_buy_time"] = time.time()
         
-        # ✨ 통계 지표: 매매횟수 누적
         db[user_id]["trade_count"] = db[user_id].get("trade_count", 0) + 1
         save_db()
         
@@ -372,7 +382,6 @@ async def sell_logic(update, context, ticker_input, amount):
         if db[user_id]["portfolio"][code]["quantity"] == 0:
             del db[user_id]["portfolio"][code]
             
-        # ✨ 통계 지표: 매매횟수 누적
         db[user_id]["trade_count"] = db[user_id].get("trade_count", 0) + 1
         save_db()
         
@@ -389,7 +398,7 @@ async def sell_logic(update, context, ticker_input, amount):
         await update.message.reply_text("⚠️ 매도 실패. 종목명을 확인해주세요.")
 
 # =========================
-# 평가 및 시각화 (비중 표시 고도화)
+# 평가 및 시각화 (요청 사항: 티커 및 비중% 조합으로 원복)
 # =========================
 def evaluate_user(data):
     total_eval = data.get("cash", 0)
@@ -433,7 +442,7 @@ def build_portfolio_data(data):
                 
     items = sorted(items, key=lambda x: x['val'], reverse=True)
     
-    # ✨ 차트 라벨 수정: 풀네임/금액 제외하고 오직 티커(코드)와 퍼센트 비중만 노출
+    # ✨ 차트 이미지 라벨: 금액 제거 후 오직 '티커 및 비중(%)' 포맷으로 통일
     for item in items:
         if not item["error"] and item['val'] > 0 and total_eval > 0:
             weight = (item['val'] / total_eval) * 100
@@ -477,8 +486,7 @@ def build_portfolio_data(data):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📖 [팀 배틀 모의투자 대회 사용 설명서]\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-      
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "⏰ 1. 증시 개장 및 거래 시간\n"
         "- 국내 주식(국장): 평일 09:05 ~ 15:30 (시가 단일가 VI 방지)\n"
         "- 미국 주식(미장): 토요일 오전 09:00까지 24시간 운영\n(평일 09시~16시59분 거래시 방장이 평단 수정)\n"
@@ -548,7 +556,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text.startswith("/"): return
     text = raw_text[1:].strip()
 
-    # ✨ 유저 통계 수집: 채팅량 가산 및 순위 언급 횟수 추적
+    # 유저 통계 수집: 채팅량 가산 및 순위 언급 횟수 추적
     if user_id in db:
         db[user_id]["chat_count"] = db[user_id].get("chat_count", 0) + 1
         if text in ["순위", "rank"]:
@@ -626,7 +634,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in db: return
         db[user_id] = {
             "name": parts[1], "team": "무소속", "cash": INITIAL_CASH, "portfolio": {}, "seed": INITIAL_CASH, "last_trade_time": time.time(),
-            "trade_count": 0, "chat_count": 0, "rank_mention_count": 0 # ✨ 통계 필드 초기화
+            "trade_count": 0, "chat_count": 0, "rank_mention_count": 0
         }
         save_db()
         await update.message.reply_text(f"🎉 [{parts[1]}]님 접수 완료. 방장의 팀 배정을 대기해주세요.")
@@ -669,7 +677,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # ✨ 대회 종료 시 창업대회 증빙용 사용자 통계 데이터 출력 기능 결합
     if text == "종료1028" and user_id == ADMIN_ID:
         await update.message.reply_text("⏳ 최종 데이터 및 참여 통계 산출 중...")
         
@@ -693,8 +700,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, t in enumerate(team_rank, 1):
             msg += f"{i}위 [{t['team']}] : {t['rate']:+.2f}%\n"
 
-        # ✨ 대회 통계 대시보드 텍스트 조립 (로그 및 보고서 증빙용)
-        msg += "\n📊 [창업대회 제출용 유저별 참여 활성 지표]\n━━━━━━━━━━━━━━\n"
+        msg += "\n📊 [ 유저별 참여 활성 지표]\n━━━━━━━━━━━━━━\n"
         for uid, data in db.items():
             if type(uid) != int: continue
             msg += f"- {data['name']} ({data.get('team', '무소속')}):\n"
@@ -755,7 +761,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif match_all:
         action = match_all.group(2)
-        await buy_logic(update, context, match_all.group(1).strip(), "ALL") if action == "풀매수" else await sell_logic(update, context, match_all.group(1).strip(), "ALL")
+        await buy_logic(update, context, match_all.left().strip(), "ALL") if action == "풀매수" else await sell_logic(update, context, match_all.group(1).strip(), "ALL")
         return
 
     try:
