@@ -238,7 +238,6 @@ async def buy_logic(update, context, ticker_input, amount):
         current_held_qty = db[user_id]["portfolio"].get(code, {}).get("quantity", 0) if code in db[user_id]["portfolio"] else 0
         current_held_value = current_held_qty * current_price
 
-        # 40% 제한
         if change_rate >= 40.0:
             max_allowed_value = total_eval * 0.4
             remaining_allowed_value = max_allowed_value - current_held_value
@@ -397,17 +396,6 @@ def evaluate_user(data):
     profit_rate = ((total_eval - seed) / seed) * 100 if seed > 0 else 0
     return total_eval, profit_rate
 
-def get_roast_message(name, rate):
-    roasts = [
-        f" {name}님, 시장에 기부하는중?",
-        f" {name}님, 투자가 아니라 투기를 하는 중입니다.",
-        f" {name}님, 교육비를 제대로 납부 중입니다.",
-        f" {name}님, 계좌가 겨울입니다. 매우 춥습니다.",
-        f" {name}님, 손실 체험학습 중입니다.",
-    ]
-    if rate >= 0: return f"😅 꼴찌인데도 수익이 났네요. 분발하세요."
-    return random.choice(roasts)
-
 def build_portfolio_data(data):
     total_eval, rate = evaluate_user(data)
     seed = data.get('seed', INITIAL_CASH)
@@ -472,22 +460,33 @@ def build_portfolio_data(data):
     return msg, chart_url
 
 # =========================
-# 기본 명령어
+# 기본 명령어 (도움말 개편)
 # =========================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "📖 [모의투자 봇 도움말]\n"
-        "━━━━━━━━━━━━━━\n"
-        "🛒 주식 매매\n"
-        "- /[종목] [수량]주 매수 (예: /삼성전자 10주 매수)\n"
-        "- /[종목] [비율]% 매수 (예: /테슬라 50% 매수)\n"
-        "- /[종목] 풀매수 / 풀매도\n\n"
-        "🔍 조회\n"
-        "- /[종목] : 현재가 조회\n"
-        "- /내계좌 : 포트폴리오 차트 조회\n"
-        "- /[상대닉네임] 계좌 : 상대방 계좌 확인\n"
-        "- /순위 : 팀전/개인 랭킹\n"
-        "- /팀명 [제안할이름] : 팀명 후보 등록"
+        "📖 [팀 모의투자 대회 사용 설명서]\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+      
+        "⏰ 1. 증시 개장 및 거래 시간\n"
+        "- 국내 주식(국장): 평일 09:05 ~ 15:30 (시가 단일가 VI 방지)\n"
+        "- 미국 주식(미장): 평일 17:00 ~ 익일 오전 09:00\n"
+        "⚠️ 미국 주식 주간 거래(데이마켓)는 시세 동기화 문제로 거래가 철저히 제한됩니다.\n"
+        "⚠️ 주말 및 공휴일은 휴장입니다.\n\n"
+        "🛒 2. 주식 매매 명령어\n"
+        "- 수량 기준 주문: /[종목명] [수량]주 매수 / 매도\n"
+        "  (예: /삼성전자 10주 매수 | /테슬라 5주 매도)\n"
+        "- 비율 기준 주문: /[종목명] [비율]% 매수 / 매도\n"
+        "  (예: /SK하이닉스 50% 매수 [현금 기준] | /애플 25% 매도 [수량 기준])\n"
+        "- 전량 주문: /[종목명] 풀매수 / 풀매도\n"
+        "⚠️ 해외주식은 유명 기업 제외 티커(TSLA, NVDA 등) 입력 필수\n\n"
+        "🔍 3. 자산 및 순위 조회\n"
+        "- /[종목명] : 해당 종목 현재가 및 등락률 실시간 조회\n"
+        "- /내계좌 : 본인의 자산 현황 및 포트폴리오 조회\n"
+        "- /[상대닉네임] 계좌 : 상대방의 자산 현황 및 포트폴리오 확인\n"
+        "- /순위 : 팀별 평균 수익률 랭킹 및 개인 순위 실시간 조회\n\n"
+        "🚫 4. 리스크 관리 시스템\n"
+        "- 단타 제한: 매수 체결 직후 해당 종목은 10분간 매도 불가 (지연 시세 악용 방지)\n"
+        "- 급등주 제한: 당일 40% 이상 폭등한 종목은 총자산의 최대 40% 비중까지만 보유 가능"
     )
     await update.message.reply_text(msg)
 
@@ -561,7 +560,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target_uid: return
         db[target_uid]["team"] = parts[2]
         save_db()
-        await update.message.reply_text(f"✅ [{parts[1]}]님을 [{parts[2]}]에 배정했습니다.")
+        await update.message.reply_text(
+            f"✅ [{parts[1]}]님을 [{parts[2]}]에 배정했습니다.\n\n"
+            f"💡 해당 팀원들은 대회 시작 전까지 '/팀명 [제안할이름]' 명령어로 팀명을 제안해 주세요. 시작 시 랜덤 추첨되어 반영됩니다."
+        )
         return
 
     if text.startswith("잔고수정") and user_id == ADMIN_ID:
@@ -609,7 +611,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🎉 [{parts[1]}]님 접수 완료. 방장의 팀 배정을 대기해주세요.")
         return
 
-    # ✨ 팀명 후보 등록
     if text.startswith("팀명 "):
         if user_id not in db: return
         new_name = text[3:].strip()
@@ -627,7 +628,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "시작" and user_id == ADMIN_ID:
         db["GAME_STATE"] = True
         
-        # ✨ 팀명 랜덤 추첨 적용
         team_map = {}
         if "TEAM_SUGGESTIONS" in db:
             for t, names in db["TEAM_SUGGESTIONS"].items():
