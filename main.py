@@ -23,7 +23,7 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8844020527:AAEfFnjRKCNr4javTv8tQll
 ADMIN_ID = 8727188480 # 방장 전용 명령어 텔레그램 ID
 
 KST = ZoneInfo("Asia/Seoul")
-EST = ZoneInfo("America/New_York") # 미국 시간대 추가
+EST = ZoneInfo("America/New_York")
 
 KOREAN_MARKET_HOLIDAYS = {
     "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18", "2026-03-02", 
@@ -157,7 +157,6 @@ def get_stock_info(target):
     
     return None, None, False, []
 
-# ✨ 미국 정규장/프리장 실시간 등락률 결함 전면 수정
 def get_current_price(code, is_us):
     try:
         if is_us:
@@ -172,10 +171,8 @@ def get_current_price(code, is_us):
             if df_min.empty: raise Exception("미국 주식 데이터 불러오기 실패")
             current_price = float(df_min["Close"].dropna().iloc[-1])
             
-            # 정확한 전일 정규장 종가 계산 로직 도입
             df_daily = tk.history(period="5d")
             us_today_str = datetime.now(EST).strftime("%Y-%m-%d")
-            # 오늘 형성된 일봉 봉 데이터가 섞여있다면 제외하여 순수 직전 마감 종가만 타겟팅
             df_daily = df_daily[df_daily.index.strftime("%Y-%m-%d") != us_today_str]
             
             if not df_daily.empty:
@@ -183,15 +180,12 @@ def get_current_price(code, is_us):
             else:
                 prev_regular_close = current_price
 
-            # 프리장/정규장 구분 없이 실시간 가격과 전일 종가 기반으로 등락률 동기화
             change_rate = ((current_price - prev_regular_close) / prev_regular_close) * 100
             
-            # 현재 정규장 시간인지 여부 체크
             now_time = datetime.now(KST).time()
             if dtime(9, 0) <= now_time < dtime(17, 0):
-                market_state = "☀️ 정규장" # 낮 시간 구동 강제용 텍스트 매칭 유지
+                market_state = "☀️ 정규장"
             else:
-                # 미국 시간 기준 정규장 작동 여부 판단 변동성 대응
                 now_est = datetime.now(EST).time()
                 if dtime(9, 30) <= now_est <= dtime(16, 0):
                     market_state = "☀️ 정규장"
@@ -226,7 +220,7 @@ def make_candidate_message(candidates):
     return msg
 
 # =========================
-# 매수 / 매도 로직 (통계 집계 반영)
+# 매수 / 매도 로직
 # =========================
 async def buy_logic(update, context, ticker_input, amount):
     user_id = update.message.from_user.id
@@ -250,7 +244,7 @@ async def buy_logic(update, context, ticker_input, amount):
         current_held_qty = db[user_id]["portfolio"].get(code, {}).get("quantity", 0) if code in db[user_id]["portfolio"] else 0
         current_held_value = current_held_qty * current_price
 
-        # ✨ 실시간 change_rate 정상 연동으로 40% 이상 폭등 제한 동작 활성화
+        # 40% 이상 급등주 제한선 계산
         if change_rate >= 40.0:
             max_allowed_value = total_eval * 0.4
             remaining_allowed_value = max_allowed_value - current_held_value
@@ -258,10 +252,11 @@ async def buy_logic(update, context, ticker_input, amount):
         else:
             max_limit_shares = int(db[user_id]["cash"] // current_price)
 
+        is_capped = False
         if amount == "ALL":
             amount = max_limit_shares
             if amount <= 0:
-                await update.message.reply_text("❌ 잔액 부족 또는 보유 한도 초과로 매수할 수 없습니다.")
+                await update.message.reply_text("❌ 잔액 부족 또는 급등주 비중 한도 초과(총자산의 40%)로 매수할 수 없습니다.")
                 return
         elif isinstance(amount, str) and amount.endswith("%"):
             pct = int(amount.replace("%", ""))
@@ -273,14 +268,19 @@ async def buy_logic(update, context, ticker_input, amount):
             if amount <= 0:
                 await update.message.reply_text("❌ 해당 비율의 현금으로는 1주도 살 수 없습니다.")
                 return
+            # ✨ 초과 주문 시 에러로 끊지 않고, 최대 가능 수량으로 자동 리사이징
             if change_rate >= 40.0 and amount > max_limit_shares:
-                await update.message.reply_text(f"🚫 급등주 비중 제한 초과. 최대 {max_limit_shares}주까지만 매수 가능합니다.")
-                return
+                amount = max_limit_shares
+                is_capped = True
         else:
             amount = int(amount)
             if change_rate >= 40.0 and amount > max_limit_shares:
-                await update.message.reply_text(f"🚫 급등주 비중 제한 초과. 최대 {max_limit_shares}주까지만 매수 가능합니다.")
-                return
+                amount = max_limit_shares
+                is_capped = True
+
+        if amount <= 0:
+            await update.message.reply_text("❌ 급등주 규제 한도(총자산의 40%)를 이미 채웠거나 초과하여 더 이상 매수할 수 없습니다.")
+            return
 
         total = current_price * amount
         if db[user_id]["cash"] < total:
@@ -313,9 +313,10 @@ async def buy_logic(update, context, ticker_input, amount):
         save_db()
         
         price_str = f"🇺🇸 ${usd_price:,.2f} (🇰🇷 {current_price:,}원)" if (is_us and usd_price is not None) else f"{current_price:,}원"
+        cap_notice = "\n⚠️ [비중 조절 안내] 해당 종목이 40% 이상 급등하여 규정상 최대 가능치(총자산의 40%)만큼만 자동 조절되어 체결되었습니다." if is_capped else ""
 
         await update.message.reply_text(
-            f"✅ {name} {amount}주 매수 완료!\n"
+            f"✅ {name} {amount}주 매수 완료!{cap_notice}\n"
             f"현재가: {price_str}\n"
             f"매수금액: {total:,}원\n"
             f"남은 현금: {db[user_id]['cash']:,}원\n"
@@ -398,7 +399,7 @@ async def sell_logic(update, context, ticker_input, amount):
         await update.message.reply_text("⚠️ 매도 실패. 종목명을 확인해주세요.")
 
 # =========================
-# 평가 및 시각화 (요청 사항: 티커 및 비중% 조합으로 원복)
+# 평가 및 시각화
 # =========================
 def evaluate_user(data):
     total_eval = data.get("cash", 0)
@@ -442,7 +443,6 @@ def build_portfolio_data(data):
                 
     items = sorted(items, key=lambda x: x['val'], reverse=True)
     
-    # ✨ 차트 이미지 라벨: 금액 제거 후 오직 '티커 및 비중(%)' 포맷으로 통일
     for item in items:
         if not item["error"] and item['val'] > 0 and total_eval > 0:
             weight = (item['val'] / total_eval) * 100
@@ -556,7 +556,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text.startswith("/"): return
     text = raw_text[1:].strip()
 
-    # 유저 통계 수집: 채팅량 가산 및 순위 언급 횟수 추적
+    # 유저 통계 수집
     if user_id in db:
         db[user_id]["chat_count"] = db[user_id].get("chat_count", 0) + 1
         if text in ["순위", "rank"]:
@@ -700,7 +700,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, t in enumerate(team_rank, 1):
             msg += f"{i}위 [{t['team']}] : {t['rate']:+.2f}%\n"
 
-        msg += "\n📊 [ 유저별 참여 활성 지표]\n━━━━━━━━━━━━━━\n"
+        msg += "\n📊 [창업대회 제출용 유저별 참여 활성 지표]\n━━━━━━━━━━━━━━\n"
         for uid, data in db.items():
             if type(uid) != int: continue
             msg += f"- {data['name']} ({data.get('team', '무소속')}):\n"
@@ -761,7 +761,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif match_all:
         action = match_all.group(2)
-        await buy_logic(update, context, match_all.left().strip(), "ALL") if action == "풀매수" else await sell_logic(update, context, match_all.group(1).strip(), "ALL")
+        # ✨ match_all.left() 오타를 match_all.group(1)로 칼같이 수정
+        await buy_logic(update, context, match_all.group(1).strip(), "ALL") if action == "풀매수" else await sell_logic(update, context, match_all.group(1).strip(), "ALL")
         return
 
     try:
