@@ -1,5 +1,5 @@
 python-telegram-bot==20.8
 nest-asyncio
-FinanceDataReader
+finance-datareader
 pandas
 yfinance
