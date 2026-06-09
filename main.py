@@ -81,13 +81,15 @@ def is_korean_market_open():
 
 def is_us_market_open():
     now = datetime.now(KST)
-    if now.weekday() in [5, 6]: return False, "미국 주식은 주말 동안 거래가 중단됩니다."
-    if now.weekday() == 0 and now.time() < dtime(17, 0): return False, "월요일 주간에는 시세가 제공되지 않습니다."
-    if dtime(9, 0) <= now.time() < dtime(17, 0): return False, "🚫 [거래 불가]\n주간 시간대는 API 시세 지연으로 거래를 제한합니다.\n(가능 시간: 17:00 ~ 익일 09:00)"
     
+    # 1. 주말(토요일, 일요일) 차단
+    if now.weekday() in [5, 6]: 
+        return False, "주말에는 미국 주식 거래가 중단됩니다."
+        
+    # 2. 미국 증시 휴장일(공휴일) 차단
     adjusted_now = now - timedelta(hours=9)
     if adjusted_now.strftime("%Y-%m-%d") in US_MARKET_HOLIDAYS:
-        return False, "오늘은 미국 증시 휴장일입니다."
+        return False, "오늘은 미국 증시 휴장일(공휴일)입니다."
         
     return True, ""
 
@@ -214,7 +216,7 @@ def make_candidate_message(candidates):
     return msg
 
 # =========================
-# 매수 / 매도 로직
+# 매수 / 매도 로직 (통계 집계 반영)
 # =========================
 async def buy_logic(update, context, ticker_input, amount):
     user_id = update.message.from_user.id
@@ -295,6 +297,9 @@ async def buy_logic(update, context, ticker_input, amount):
         holding["name"] = name
         holding["is_us"] = is_us
         holding["last_buy_time"] = time.time()
+        
+        # ✨ 통계 지표: 매매횟수 누적
+        db[user_id]["trade_count"] = db[user_id].get("trade_count", 0) + 1
         save_db()
         
         price_str = f"🇺🇸 ${usd_price:,.2f} (🇰🇷 {current_price:,}원)" if (is_us and usd_price is not None) else f"{current_price:,}원"
@@ -366,6 +371,9 @@ async def sell_logic(update, context, ticker_input, amount):
         db[user_id]["portfolio"][code]["quantity"] -= amount
         if db[user_id]["portfolio"][code]["quantity"] == 0:
             del db[user_id]["portfolio"][code]
+            
+        # ✨ 통계 지표: 매매횟수 누적
+        db[user_id]["trade_count"] = db[user_id].get("trade_count", 0) + 1
         save_db()
         
         sign = "+" if profit_rate > 0 else ""
@@ -381,7 +389,7 @@ async def sell_logic(update, context, ticker_input, amount):
         await update.message.reply_text("⚠️ 매도 실패. 종목명을 확인해주세요.")
 
 # =========================
-# 평가 및 시각화
+# 평가 및 시각화 (비중 표시 고도화)
 # =========================
 def evaluate_user(data):
     total_eval = data.get("cash", 0)
@@ -416,22 +424,25 @@ def build_portfolio_data(data):
                 cur_price, _, _, _ = get_current_price(code, is_us)
                 val = cur_price * info['quantity']
                 items.append({
-                    "name": info['name'], "qty": info['quantity'], 
+                    "code": code, "name": info['name'], "qty": info['quantity'], 
                     "avg_price": info.get('avg_price', 0), "cur_price": cur_price,
                     "val": val, "error": False
                 })
             except Exception:
-                items.append({"name": info['name'], "qty": info['quantity'], "val": 0, "error": True})
+                items.append({"code": code, "name": info['name'], "qty": info['quantity'], "val": 0, "error": True})
                 
     items = sorted(items, key=lambda x: x['val'], reverse=True)
     
-    # ✨ 차트 이미지 가독성 업그레이드: 범례 라벨에 컴마가 포함된 명확한 자산 금액 추가
+    # ✨ 차트 라벨 수정: 풀네임/금액 제외하고 오직 티커(코드)와 퍼센트 비중만 노출
     for item in items:
-        if not item["error"] and item['val'] > 0:
-            labels.append(f"{item['name']} ({item['val']:,}원)")
+        if not item["error"] and item['val'] > 0 and total_eval > 0:
+            weight = (item['val'] / total_eval) * 100
+            labels.append(f"{item['code']} ({weight:.1f}%)")
             values.append(item['val'])
-    if cash > 0:
-        labels.append(f"현금 ({cash:,}원)")
+            
+    if cash > 0 and total_eval > 0:
+        cash_weight = (cash / total_eval) * 100
+        labels.append(f"CASH ({cash_weight:.1f}%)")
         values.append(cash)
 
     chart_url = None
@@ -467,12 +478,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📖 [팀 배틀 모의투자 대회 사용 설명서]\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
- 
+      
         "⏰ 1. 증시 개장 및 거래 시간\n"
-        "- 국내 주식(국장): 평일 09:05 ~ 15:30 (시가 단일가 VI 꼼수 방지)\n"
-        "- 미국 주식(미장): 평일 17:00 ~ 익일 오전 09:00\n"
-        "⚠️ 미국 주식 주간 거래(데이마켓)는 시세 동기화 문제로 거래가 철저히 제한됩니다.\n"
-        "⚠️ 주말 및 양국 공휴일은 양쪽 시장 모두 휴장입니다.\n\n"
+        "- 국내 주식(국장): 평일 09:05 ~ 15:30 (시가 단일가 VI 방지)\n"
+        "- 미국 주식(미장): 토요일 오전 09:00까지 24시간 운영\n(평일 09시~16시59분 거래시 방장이 평단 수정)\n"
+        "⚠️ 주말 및 공휴일은 휴장입니다.\n\n"
         "🛒 2. 주식 매매 명령어\n"
         "- 수량 기준 주문: /[종목명] [수량]주 매수 / 매도\n"
         "  (예: /삼성전자 10주 매수 | /테슬라 5주 매도)\n"
@@ -485,7 +495,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- /내계좌 : 본인의 자산 현황 및 포트폴리오 파이 차트 시각화 조회\n"
         "- /[상대닉네임] 계좌 : 상대방의 자산 현황 및 포트폴리오 차트 확인\n"
         "- /순위 : 팀별 평균 수익률 랭킹 및 개인 순위 실시간 조회\n\n"
-        "🚫 4. 리스크 관리 시스템\n"
+        "🚫 4. 단타 로직 제한\n"
         "- 단타 제한: 매수 체결 직후 해당 종목은 10분간 매도 불가 (지연 시세 악용 방지)\n"
         "- 급등주 제한: 당일 40% 이상 폭등한 종목은 총자산의 최대 40% 비중까지만 보유 가능"
     )
@@ -538,6 +548,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text.startswith("/"): return
     text = raw_text[1:].strip()
 
+    # ✨ 유저 통계 수집: 채팅량 가산 및 순위 언급 횟수 추적
+    if user_id in db:
+        db[user_id]["chat_count"] = db[user_id].get("chat_count", 0) + 1
+        if text in ["순위", "rank"]:
+            db[user_id]["rank_mention_count"] = db[user_id].get("rank_mention_count", 0) + 1
+        save_db()
+
     # 방장 명령어
     if text in ["방장 도움말", "방장도움말", "admin"]:
         if user_id != ADMIN_ID: return
@@ -563,7 +580,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_db()
         await update.message.reply_text(
             f"✅ [{parts[1]}]님을 [{parts[2]}]에 배정했습니다.\n\n"
-            f"💡 해당 팀원들은 대회 시작 전까지 '/팀명 [제안할이름]' 명령어로 팀명을 제안해 주세요. 시작 시 랜덤 추첨되어 반영됩니다."
+            f"💡 해당 팀원들은 대회 시작 전까지 '/팀명 [원하는이름]' 명령어로 팀명을 제안해 주세요. 시작 시 랜덤 추첨되어 반영됩니다."
         )
         return
 
@@ -607,7 +624,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = text.split()
         if len(parts) != 2: return
         if user_id in db: return
-        db[user_id] = {"name": parts[1], "team": "무소속", "cash": INITIAL_CASH, "portfolio": {}, "seed": INITIAL_CASH, "last_trade_time": time.time()}
+        db[user_id] = {
+            "name": parts[1], "team": "무소속", "cash": INITIAL_CASH, "portfolio": {}, "seed": INITIAL_CASH, "last_trade_time": time.time(),
+            "trade_count": 0, "chat_count": 0, "rank_mention_count": 0 # ✨ 통계 필드 초기화
+        }
         save_db()
         await update.message.reply_text(f"🎉 [{parts[1]}]님 접수 완료. 방장의 팀 배정을 대기해주세요.")
         return
@@ -649,10 +669,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
+    # ✨ 대회 종료 시 창업대회 증빙용 사용자 통계 데이터 출력 기능 결합
     if text == "종료1028" and user_id == ADMIN_ID:
-        db.update({"GAME_STATE": False, "REG_STATE": False})
+        await update.message.reply_text("⏳ 최종 데이터 및 참여 통계 산출 중...")
+        
+        team_stats, indiv_list = {}, []
+        for uid, data in db.items():
+            if type(uid) != int: continue
+            total_eval, _ = evaluate_user(data)
+            t_name = data.get("team", "무소속")
+            if t_name not in team_stats: team_stats[t_name] = {"total_eval": 0, "seed": 0}
+            team_stats[t_name]["total_eval"] += total_eval
+            team_stats[t_name]["seed"] += data.get("seed", INITIAL_CASH)
+            indiv_list.append({"team": t_name, "name": data["name"], "total": total_eval})
+
+        msg = "🏁 [팀 배틀 대회 종료] 🏁\n━━━━━━━━━━━━━━\n\n"
+        team_rank = []
+        for t_name, stats in team_stats.items():
+            if stats["seed"] > 0:
+                team_rate = ((stats["total_eval"] - stats["seed"]) / stats["seed"]) * 100
+                team_rank.append({"team": t_name, "rate": team_rate})
+        team_rank = sorted(team_rank, key=lambda x: x["rate"], reverse=True)
+        for i, t in enumerate(team_rank, 1):
+            msg += f"{i}위 [{t['team']}] : {t['rate']:+.2f}%\n"
+
+        # ✨ 대회 통계 대시보드 텍스트 조립 (로그 및 보고서 증빙용)
+        msg += "\n📊 [창업대회 제출용 유저별 참여 활성 지표]\n━━━━━━━━━━━━━━\n"
+        for uid, data in db.items():
+            if type(uid) != int: continue
+            msg += f"- {data['name']} ({data.get('team', '무소속')}):\n"
+            msg += f"  └ 매매 거래: {data.get('trade_count', 0)}회\n"
+            msg += f"  └ 총 채팅량: {data.get('chat_count', 0)}회\n"
+            msg += f"  └ 순위 조회: {data.get('rank_mention_count', 0)}회\n"
+
+        await update.message.reply_text(msg)
+        
+        db.clear()
+        db.update({"GAME_STATE": False, "REG_STATE": False, "TEAM_SUGGESTIONS": {}})
         save_db()
-        await update.message.reply_text("🏁 대회가 종료되었습니다. /순위 명령어로 결과를 확인하세요.")
         return
 
     if text in ["도움말", "help"]:
@@ -681,7 +735,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in db: return
 
-    # 주문 처리 (정규식 고도화: %, 프로, 퍼센트 통합 지원)
+    # 주문 처리
     match_qty = re.search(r"([가-힣A-Za-z0-9\s\.\-_]+?)\s+(\d+)\s*주?\s*(매수|사줘|매도|팔아)", text)
     match_pct = re.search(r"([가-힣A-Za-z0-9\s\.\-_]+?)\s+(\d+)\s*(?:%|프로|퍼센트)\s*(매수|사줘|매도|팔아)", text)
     match_all = re.search(r"([가-힣A-Za-z0-9\s\.\-_]+?)\s*(풀매수|풀매도)", text)
